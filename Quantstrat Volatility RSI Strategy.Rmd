@@ -1,0 +1,107 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+## Load libraries ##
+library(quantmod)
+library(quantstrat)
+library(IKTrading)
+## Retrieve data ##
+stocks <- c("XLF", "XLP", "XLU", "XLV", "XLE", "XLRE", "XLY", "XLK", "XLB", "XLI")
+initdate <- "1999-01-01"
+from <- "2010-01-01"
+to <- "2022-01-01"
+getSymbols(stocks, from = from, to = to, src = "yahoo", adjust = TRUE)
+## Settings ##
+options(warn = -1) # Suppress warnings
+.stoploss <- .05
+.txnfees <- .0
+stoploss_enabled <- TRUE
+tradesize <- 100
+initialequity <- 100
+## Functions ##
+# Derives volatility from Bollinger Bands
+VolatilityBands <- function(HLC, n = 20, maType = 'SMA', sd = 2){
+  BBands <- BBands(HLC = HLC, n = n, maType = maType, sd = sd)
+  BBands$volatility <- BBands$up - BBands$dn
+  BBands$volatilityrank <- runPercentRank(BBands$volatility)
+  return(BBands)
+}
+## Initialize Portfolio Objects ##
+Sys.setenv(TZ = "UTC")
+currency("USD")
+for(stock in stocks) {
+  stock(stock, currency = "USD", multiplier = 1)
+}
+strategy.st <- portfolio.st <- account.st <- "backtest"
+rm.strat(strategy.st)
+initPortf(portfolio.st, symbols = stocks, initDate = initdate, currency = "USD")
+initAcct(account.st, portfolios = portfolio.st, symbols = stocks, initDate = initdate, currency = "USD", initEq = initialequity)
+initOrders(portfolio.st, initDate = initdate)
+for(stock in stocks) {
+  addPosLimit(portfolio.st, symbol = stock, timestamp = initdate, maxpos = 1, minpos = -1)
+  
+}
+strategy(strategy.st, store = TRUE)
+## Add Indicators to Strategy ##
+add.indicator(strategy.st, name = "VolatilityBands", arguments = list(HLC = quote(Cl(mktdata)), n = 20, maType = 'SMA', sd = 2), label = "BBands")
+add.indicator(strategy.st, name = "RSI", arguments = list(price = quote(Cl(mktdata)), n = 4), label = "RSI14")
+test <- applyIndicators(strategy= strategy.st, mktdata = OHLC(XLF))
+head(test)
+## Add Signals to Strategy
+add.signal(strategy.st, name = "sigComparison", arguments = list(columns = c("Close", "up"), relationship = "gte"), label = "bollingershort")
+add.signal(strategy.st, name = "sigComparison", arguments = list(columns = c("Close", "dn"), relationship = "lte"), label = "bollingerlong")
+add.signal(strategy.st, name = "sigComparison", arguments = list(columns = c("Close", "mavg"), relationship = "gte"), label = "bollingerlexit")
+add.signal(strategy.st, name = "sigComparison", arguments = list(columns = c("Close", "mavg"), relationship = "lte"), label = "bollingersexit")
+add.signal(strategy.st, name = "sigThreshold", arguments = list(column = c("RSI14"), threshold = 30, relationship = "lt", cross = TRUE), label = "oversold")
+add.signal(strategy.st, name = "sigThreshold", arguments = list(column = c("RSI14"), threshold = 50, relationship = "lte", cross = TRUE), label = "rsimid")
+
+add.signal(strategy.st, name = "sigThreshold", arguments = list(column = c("RSI14"), threshold = 70, relationship = "gte", cross = TRUE), label = "overbought")
+add.signal(strategy.st, name = "sigThreshold", arguments = list(column = c("volatilityrank"), threshold = .5, relationship = "lt", cross = FALSE), label = "lowvolatility")
+add.signal(strategy.st, name = "sigThreshold", arguments = list(column = c("volatilityrank"), threshold = .5, relationship = "gt", cross = FALSE), label = "highvolatility")
+add.signal(strategy.st, name = "sigFormula", arguments = list(formula = "oversold & lowvolatility", cross = TRUE), label = "longentry")
+add.signal(strategy.st, name = "sigFormula", arguments = list(formula = "overbought", cross = TRUE), label = "longexit")
+## Add Rules to Strategy
+add.rule(strategy.st, name = "ruleSignal", arguments = list(sigcol = "longentry", sigval = TRUE, ordertype = "market", orderside = "long", replace = FALSE, TxnFees = .txnfees, prefer = "Close", orderset = "longrule", osFUN = osMaxDollar, tradeSize = tradesize, maxSize = tradesize),  type = "enter", label = "longenter")
+add.rule(strategy.st, name = "ruleSignal", arguments = list(sigcol = "longexit", sigval = TRUE, orderqty = "all", ordertype = "market", orderside = "long", replace = FALSE, TxnFees = .txnfees, prefer = "Close", orderset = "longrule"), type = "exit", label = "longexit")
+add.rule(strategy.st, name = "ruleSignal", arguments = list(sigcol = "longexit", sigval = TRUE, orderqty = "all", ordertype = "stoplimit", tmult = TRUE, threshold = quote(.stoploss), orderside = "long", replace = FALSE, TxnFees = .txnfees, prefer = "Close", orderset = "longrule"), type = "chain", parent = "longenter", label = "longstop", enabled = FALSE)
+if(stoploss_enabled == TRUE) {
+enable.rule(strategy.st, 
+            type = "chain", 
+            label = "longstop")
+}
+## Apply Strategy ##
+applyStrategy(strategy = strategy.st, portfolios = portfolio.st)
+updatePortf(portfolio.st)
+daterange <- time(getPortfolio(portfolio.st)$summary)[-1]
+updateAcct(account.st, daterange)
+updateEndEq(account.st)
+## Trade Stats ##
+getSymbols("SPY", from = from, to = to)
+tradeStats(Portfolios = portfolio.st)
+portPL <- .blotter$portfolio.backtest$summary$Net.Trading.PL
+SharpeRatio.annualized(portPL, geometric = FALSE) #Profit/Loss Sharpe
+for(stock in stocks){
+    dev.new()
+    chart.Posn(Portfolio=portfolio.st,Symbol=stock)
+}
+final_acct <- getAccount(account.st)
+plot(final_acct$summary$End.Eq["2010/2022"], main = "Portfolio Equity Curve")
+lines(Cl(SPY), col = "blue") # benchmark
+legend("topleft", inset = c(.4,0), legend=c("Portfolio Equity", "Benchmark"),
+       col=c("black", "blue"), lty=1:2, cex=.7)
+
+
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
